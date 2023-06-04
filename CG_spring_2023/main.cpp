@@ -26,7 +26,8 @@
 #define DBG_V3(v1, v2, v3) { std::cerr << " " << #v1 << ' ' << v1 << ";  " << #v2 << ' ' <<  v2 << "; " << #v3 << ' ' << v3 <<  std::endl; }
 #define DBG_V4(v1, v2, v3, v4) { std::cerr << " " << #v1 << ' ' << v1 << ";  " << #v2 << ' ' <<  v2 << "; " << #v3 << ' ' << v3 << "; " << #v4 << ' ' << v4 <<  std::endl; }
 
-#define DBG_MSG_ARR_V(v) { std::cerr << ""#v" = { "; for (auto& el : v) std::cerr << el << "; "; std::cerr << std::endl; }
+#define DBG_MSG_ARR_V(v) { std::cerr << ""#v" = { "; for (auto& el : v) std::cerr << el << "; "; std::cerr << '}' << std::endl; }
+#define DBG_MSG_ARR_SPEC_pV(arr, m) { std::cerr << ""#arr"->"#m" = { "; for (auto& el : arr) std::cerr << el->m << "; "; std::cerr << '}' << std::endl; }
 
 enum MC_Type {
     MC_EMPTY = 0,
@@ -65,6 +66,8 @@ struct GameInfo
     int cur_crystals = 0;
     int init_eggs = 0;
     int cur_eggs = 0;
+
+    int init_my_ants = 0;
 
     int my_ants = 0;
     int opp_ants = 0;
@@ -153,6 +156,8 @@ struct GameInfo
                     init_crystals += resources;
                 else if (map[i]->type == MC_EGGS)
                     init_eggs += resources;
+
+                init_my_ants += my_ants_in_cell;
             }
 
             if (map[i]->type == MC_CRYSTAL && resources != 0) {
@@ -305,6 +310,14 @@ struct IdxStrength {
     int idx;
     int strength;
 };
+
+
+struct SrcDestStrength {
+    int srcIdx;
+    int destIdx;
+    int strength;
+};
+
 using EvaluateSteps = std::vector<std::vector<IdxStrength>>;
 
 class StateMachine {
@@ -363,7 +376,7 @@ struct CellNeighbours {
     int getCurCellResources() { return std::accumulate(neighbours.begin(), neighbours.end(), pCell->resources, [](int u, auto pCell) { return u + pCell->resources; }); }
 };
 
-CachebleWaveAlg::SearchResult* getNearestCellToPos(std::vector<MapCell*>& cells, int posIdx, bool bEggsEmptyOnly)
+CachebleWaveAlg::SearchResult* get2NearestCellToPos(std::vector<MapCell*>& cells, int posIdx, bool bEggsEmptyOnly)
 {
     if (cells.empty())
         return nullptr;
@@ -474,11 +487,23 @@ public:
         {
             m_curBestCrystal = -1;
         }
+
+        for (auto pBase : GInf.my_bases)
+        {
+            if (m_curBasesBestEggMap[pBase].srcIdx != -1 && GInf.map[m_curBasesBestEggMap[pBase].destIdx]->resources == 0)
+                m_curBasesBestEggMap[pBase] = { -1, -1, -1 };
+
+
+            if (m_curBasesBestCrystalMap[pBase].srcIdx != -1 && GInf.map[m_curBasesBestCrystalMap[pBase].destIdx]->resources == 0)
+                m_curBasesBestCrystalMap[pBase] = { -1, -1, -1 };
+        }
     }
 
     void Execute()
     {
         DBG_MSG_V2("Strategy::Execute+", m_curBestEnemyCrystal, m_curBestCrystal);
+        DBG_V(GInf.my_bases.size());
+        DBG_MSG_ARR_SPEC_pV(GInf.my_bases, idx);
 
 
         auto& cAlg = CachebleWaveAlg::getInstance();
@@ -493,10 +518,16 @@ public:
                     auto pSearchRes = cAlg.waveAlgorithm(pCell1->idx, pCell2->idx, false);
                     m_mapDiameter = std::max(pSearchRes->distance + 1, m_mapDiameter);
                 }
+
+            for (auto pBase : GInf.my_bases)
+            {
+                m_curBasesBestEggMap[pBase] = { -1, -1, -1 };
+                m_curBasesBestCrystalMap[pBase] = { -1, -1, 1 };
+            }
         }
 
 
-        std::vector<EggPath> eggsSR;
+        std::vector<EggPath> eggsSR_old;
         for (auto pEgg : GInf.eggs)
         {
             if (pEgg->resources == 0)
@@ -504,18 +535,65 @@ public:
 
             auto pSearchRes = cAlg.waveAlgorithm(GInf.my_bases[0]->idx, pEgg->idx, false);
             //DBG_MSG_V2("X0", pSearchRes->distance, pSearchRes->path.size());
-            if (pSearchRes) eggsSR.emplace_back(EggPath{ pEgg, pSearchRes->distance, pEgg->resources, pSearchRes->path });
+            if (pSearchRes) eggsSR_old.emplace_back(EggPath{ pEgg, pSearchRes->distance, pEgg->resources, pSearchRes->path });
             else            DBG_MSG_S("ERR: pSearchRes == nullptr");
         }
 
-        std::sort(eggsSR.begin(), eggsSR.end(), [](const auto& lhd, const auto& rhd) { return lhd.distance < rhd.distance; });
-        eggsSR.erase(
-            std::remove_if(eggsSR.begin(), eggsSR.end(), [](const auto& o) { return o.distance == std::numeric_limits<int>::max() || o.resource == 0; }),
-            eggsSR.end());
+        std::sort(eggsSR_old.begin(), eggsSR_old.end(), [](const auto& lhd, const auto& rhd) { return lhd.distance < rhd.distance; });
+        eggsSR_old.erase(
+            std::remove_if(eggsSR_old.begin(), eggsSR_old.end(), [](const auto& o) { return o.distance == std::numeric_limits<int>::max() || o.resource == 0; }),
+            eggsSR_old.end());
 
-        if (eggsSR.empty() || (!eggsSR.empty() && m_mapDiameter / 2.2 < eggsSR[0].distance))
+        //DBG_V4(m_mapDiameter / 2.2, eggsSR_old[0].distance, (GInf.init_eggs + GInf.init_my_ants) / 2, GInf.my_ants);
+        //if (eggsSR_old.empty() || (!eggsSR_old.empty() && m_mapDiameter / 2.2 < eggsSR_old[0].distance) || (GInf.init_eggs + GInf.init_my_ants + ((GInf.init_eggs + GInf.init_my_ants) % 2 == 0 ? 0 : 1)) / 2 <= GInf.my_ants)
+        DBG_MSG_V2("{ targetAnts; curAnts }:", (GInf.init_eggs / 2) + GInf.init_my_ants, GInf.my_ants);
+        if ((GInf.init_eggs / 2) + GInf.init_my_ants <= GInf.my_ants)
         {
             DBG_MSG_S("crystal");
+
+            for (auto pBase : GInf.my_bases)
+            {
+                if (m_curBasesBestCrystalMap[pBase].srcIdx == -1)
+                {
+                    DBG_MSG_S("=============== Find new 'best crystal' logic ===============");
+                    DBG_V(pBase->idx);
+
+                    std::vector<CachebleWaveAlg::SearchResult*> crystalsSR;
+                    for (auto pCrystal : GInf.crystals)
+                    {
+                        if (pCrystal->resources == 0)
+                            continue;
+
+                        auto pSearchRes = cAlg.waveAlgorithm(pBase->idx, pCrystal->idx, false);
+                        //DBG_MSG_V3("X0 crystals", pCrystal->idx, pSearchRes->distance, pSearchRes->path.size());
+                        if (pSearchRes) crystalsSR.emplace_back(pSearchRes);
+                        else            DBG_MSG_S("ERR: pSearchRes == nullptr");
+                    }
+
+                    std::sort(crystalsSR.begin(), crystalsSR.end(), [](const auto lhd, const auto rhd) { return GInf.map[lhd->path.back()]->resources / (lhd->distance + 1) > GInf.map[rhd->path.back()]->resources / (rhd->distance + 1); });
+
+                    if (!crystalsSR.empty())
+                    {
+                        int antsPerCell = GInf.my_ants;
+                        antsPerCell /= (crystalsSR[0]->distance + 1);
+
+                        m_curBasesBestCrystalMap[pBase] = { crystalsSR[0]->path.front(), crystalsSR[0]->path.back(), antsPerCell };
+                    }
+                    else
+                    {
+                        DBG_MSG_S("ERROR: crystalsSR.empty() == true");
+                    }
+                }
+
+                if (m_curBasesBestCrystalMap[pBase].srcIdx != -1)
+                {
+                    DBG_MSG_S("=============== Evaluate 'best crystal' logic ===============");
+                    DBG_V3(pBase->idx, m_curBasesBestCrystalMap[pBase].srcIdx, m_curBasesBestCrystalMap[pBase].destIdx);
+
+                    GCommand.AddLine(m_curBasesBestCrystalMap[pBase].srcIdx, m_curBasesBestCrystalMap[pBase].destIdx, m_curBasesBestCrystalMap[pBase].strength);
+                }
+            }
+            /*
 
             // Find best crystals spot
             if (m_curCrystalSpot.pCell == nullptr)
@@ -523,39 +601,6 @@ public:
                 static const int MAX_SPOT_DISTANCE = 3;
 
                 m_curCrystalSpot = GetBestCellSpot(GInf.crystals, GInf.MAX_CRYSTALS_SPOT_DISTANCE);
-                /*
-                std::vector<CellNeighbours> neighbourCrystalsMap;
-                for (auto pCrystal1 : GInf.crystals)
-                {
-                    auto pSearchRes = cAlg.waveAlgorithm(GInf.my_bases[0]->idx, pCrystal1->idx, false);
-
-                    neighbourCrystalsMap.emplace_back(CellNeighbours{ pCrystal1, {}, pCrystal1->resources, pSearchRes->distance + 1 });
-                    for (auto pCrystal2 : GInf.crystals)
-                    {
-                        if (pCrystal1 == pCrystal2)
-                            continue;
-
-                        auto pSearchRes = cAlg.waveAlgorithm(pCrystal1->idx, pCrystal2->idx, false);
-                        if (pSearchRes->distance < MAX_SPOT_DISTANCE) {
-                            neighbourCrystalsMap.back().neighbours.emplace_back(pCrystal2);
-                            neighbourCrystalsMap.back().totalResources += pCrystal2->resources;
-                        }
-                    }
-
-                    if (neighbourCrystalsMap.back().neighbours.empty())
-                        neighbourCrystalsMap.pop_back();
-                }
-
-                if (!neighbourCrystalsMap.empty())
-                {
-                    // Select best spot
-                    std::sort(neighbourCrystalsMap.begin(), neighbourCrystalsMap.end(), [](const auto& lhd, const auto& rhd) {
-                        return lhd.totalResources / lhd.distFromBase > rhd.totalResources / rhd.distFromBase;
-                        });
-
-                    m_curCrystalSpot = neighbourCrystalsMap[0];
-                }
-                */
             }
 
             // If crystal spot exists - prefer it, otherwise - just get nearest crystal
@@ -601,39 +646,6 @@ public:
 
                 auto enemyCrystalsSR = crystalsSR; // create a copy
 
-                //// Best enemy crystal
-                //if (m_curBestEnemyCrystal == -1)
-                //{
-                //    DBG_MSG_S("=============== Find new 'best enemy crystal' logic ===============");
-                //    enemyCrystalsSR.erase(
-                //        std::remove_if(enemyCrystalsSR.begin(), enemyCrystalsSR.end(), [this](const auto pO) { return pO->distance < m_mapDiameter / 2; }),
-                //        enemyCrystalsSR.end());
-                //
-                //
-                //    //DBG_MSG_S("enemyCrystalsSR:");
-                //    //for (auto pCell : enemyCrystalsSR)
-                //    //    std::cerr << "back: " << pCell->path.back() << ' ' << "size: " << pCell->path.size() << " first " << pCell->path.front();
-                //    //std::cerr << '\n';
-                //
-                //    std::sort(enemyCrystalsSR.begin(), enemyCrystalsSR.end(), [](const auto lhd, const auto rhd) { return GInf.map[lhd->path.back()]->resources / (lhd->distance + 1) > GInf.map[rhd->path.back()]->resources / (rhd->distance + 1); });
-                //
-                //
-                //    if (!enemyCrystalsSR.empty())
-                //    {
-                //        auto pNearestCrystalSR = enemyCrystalsSR[0];
-                //        m_curBestEnemyCrystal = pNearestCrystalSR->path.back();
-                //
-                //        if (m_curBestEnemyCrystal == GInf.my_bases[0]->idx)
-                //            m_curBestEnemyCrystal = pNearestCrystalSR->path.front();
-                //    }
-                //}
-                //if (m_curBestEnemyCrystal != -1)
-                //{
-                //    DBG_MSG_S("=============== Evaluate 'best enemy crystal' logic ===============");
-                //    DBG_V2(GInf.my_bases[0]->idx, m_curBestEnemyCrystal);
-                //    GCommand.AddLine(GInf.my_bases[0]->idx, m_curBestEnemyCrystal, 1);
-                //}
-
                 // Best crystal
                 if (m_curBestCrystal == -1)
                 {
@@ -662,15 +674,8 @@ public:
                     DBG_V2(GInf.my_bases[0]->idx, m_curBestCrystal);
                     GCommand.AddLine(GInf.my_bases[0]->idx, m_curBestCrystal, m_currFarAwayCrystalStrengts);
                 }
-
-                //for (auto pCell : GInf.crystals)
-                //{
-                //    if (pCell->resources == 0 || pCell->idx == m_curBestCrystal || pCell->idx == m_curBestEnemyCrystal)
-                //        continue;
-                //
-                //    GCommand.AddLine(GInf.my_bases[0]->idx, pCell->idx, 1);
-                //}
             }
+            */
         }
         else
         {
@@ -692,7 +697,7 @@ public:
                     m_curEggSpot = GetBestCellSpot(eggsNearestToMe, GInf.MAX_EGGS_SPOT_DISTANCE);
                 }
             }
-
+            /*
             if (m_curEggSpot.pCell != nullptr)
             {
                 auto& cAlg = CachebleWaveAlg::getInstance();
@@ -717,33 +722,49 @@ public:
                 }
             }
             else
+                */
             {
-                DBG_MSG_S("=============== Evaluate simple eggs logic ===============");
-                DBG_V3(GInf.my_ants, eggsSR[0].targetCell->idx, eggsSR[0].distance);
-
-                int antsPerCell = GInf.my_ants / (eggsSR[0].distance + 1);
-                auto eggCell = eggsSR[0].targetCell;
-                if (antsPerCell <= eggCell->resources)
+                for (auto pBase : GInf.my_bases)
                 {
-                    DBG_V(antsPerCell);
-                    GCommand.AddLine(eggsSR[0].path.front(), eggsSR[0].path.back(), antsPerCell);
-                }
-                else
-                {
-                    int antsPerCell_0 = eggCell->resources;
-                    int antsPerCell_1 = (GInf.my_ants - eggCell->resources * eggsSR[0].distance) / (eggsSR[1].distance + 1);
-                    DBG_V3(GInf.my_ants, antsPerCell_0, antsPerCell_1);
+                    if (m_curBasesBestEggMap[pBase].srcIdx == -1)
+                    {
+                        DBG_MSG_S("=============== Evaluate find 'best eggs' logic ===============");
+                        DBG_V(pBase->idx);
 
-                    if (eggsSR.size() == 1)
-                        return; // no more eggs
+                        std::vector<CachebleWaveAlg::SearchResult*> eggsSR;
+                        for (auto pEgg : GInf.eggs)
+                        {
+                            if (pEgg->resources == 0)
+                                continue;
 
-                    //for (int idx : eggsSR[1].path)
-                    //    GCommand.AddBeacon(idx, antsPerCell_1);
-                    //
-                    //for (int idx : eggsSR[0].path)
-                    //    GCommand.AddBeacon(idx, antsPerCell_0);
-                    GCommand.AddLine(eggsSR[1].path.front(), eggsSR[1].path.back(), antsPerCell);
-                    GCommand.AddLine(eggsSR[0].path.front(), eggsSR[0].path.back(), antsPerCell);
+                            auto pSearchRes = cAlg.waveAlgorithm(pBase->idx, pEgg->idx, false);
+                            //DBG_MSG_V3("X0 crystals", pCrystal->idx, pSearchRes->distance, pSearchRes->path.size());
+                            if (pSearchRes) eggsSR.emplace_back(pSearchRes);
+                            else            DBG_MSG_S("ERR: pSearchRes == nullptr");
+                        }
+                        // std::sort(eggsSR.begin(), eggsSR.end(), [](const auto lhd, const auto rhd) { return GInf.map[lhd->path.back()]->resources / (lhd->distance + 1) > GInf.map[rhd->path.back()]->resources / (rhd->distance + 1); });
+                        std::sort(eggsSR.begin(), eggsSR.end(), [](const auto lhd, const auto rhd) { return lhd->distance < rhd->distance; });
+
+                        if (!eggsSR.empty())
+                        {
+                            int antsPerCell = GInf.my_ants;
+                            antsPerCell /= (eggsSR[0]->distance + 1);
+
+                            m_curBasesBestEggMap[pBase] = { eggsSR[0]->path.front(), eggsSR[0]->path.back(), antsPerCell };
+                        }
+                        else
+                        {
+                            DBG_MSG_S("ERROR: eggsSR.empty() == true");
+                        }
+                    }
+
+                    if (m_curBasesBestEggMap[pBase].srcIdx != -1)
+                    {
+                        DBG_MSG_S("=============== Evaluate 'best eggs' logic ===============");
+                        DBG_V3(pBase->idx, m_curBasesBestEggMap[pBase].srcIdx, m_curBasesBestEggMap[pBase].destIdx);
+
+                        GCommand.AddLine(m_curBasesBestEggMap[pBase].srcIdx, m_curBasesBestEggMap[pBase].destIdx, m_curBasesBestEggMap[pBase].strength);
+                    }
                 }
             }
         }
@@ -765,6 +786,9 @@ private:
 
     CellNeighbours m_curCrystalSpot;
     CellNeighbours m_curEggSpot;
+
+    std::map<MapCell*, SrcDestStrength> m_curBasesBestEggMap;
+    std::map<MapCell*, SrcDestStrength> m_curBasesBestCrystalMap;
 };
 
 int main()
