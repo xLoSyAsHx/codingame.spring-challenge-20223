@@ -1,0 +1,4 @@
+*/.vs/*
+CG_spring_2023/x64/*
+*.vcxproj.user
+*.vcxproj.filters
